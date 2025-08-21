@@ -1,3 +1,10 @@
 # Exported prompts
 prompt_exports/
 *.txt
+
+# SQLite database
+prompts.db
+prompts.db-*
+
+# Logs
+prompt_sync.log
