@@ -1,0 +1,9 @@
+version: "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
+options: "07697d3b3dfd416d96564edb417692ef4602a00b83f377487094d4fdd8252ad6"
+build_start_time: [1760187123, 861450000]
+build_end_time: [1760187127, 18558000]
+inputs:
+  "/Users/kussshhhh/cooking/prompt_flow/PromptFloater/AppDelegate.swift": [1760186619, 503669430]
+  "/Users/kussshhhh/cooking/prompt_flow/PromptFloater/FloatingWindowController.swift": [1760187059, 785647178]
+  ? "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/DerivedSources/GeneratedAssetSymbols.swift"
+  : [1760187123, 799301258]

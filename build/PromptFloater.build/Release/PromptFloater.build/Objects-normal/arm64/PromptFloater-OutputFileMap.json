@@ -1,0 +1,25 @@
+{
+  "" : {
+    "const-values" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master.swiftconstvalues",
+    "dependencies" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master.d",
+    "diagnostics" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master.dia",
+    "emit-module-dependencies" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master-emit-module.d",
+    "emit-module-diagnostics" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master-emit-module.dia",
+    "swift-dependencies" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/PromptFloater-master.swiftdeps"
+  },
+  "/Users/kussshhhh/cooking/prompt_flow/PromptFloater/AppDelegate.swift" : {
+    "index-unit-output-path" : "/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/AppDelegate.o",
+    "llvm-bc" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/AppDelegate.bc",
+    "object" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/AppDelegate.o"
+  },
+  "/Users/kussshhhh/cooking/prompt_flow/PromptFloater/FloatingWindowController.swift" : {
+    "index-unit-output-path" : "/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/FloatingWindowController.o",
+    "llvm-bc" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/FloatingWindowController.bc",
+    "object" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/FloatingWindowController.o"
+  },
+  "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/kussshhhh/cooking/prompt_flow/build/PromptFloater.build/Release/PromptFloater.build/Objects-normal/arm64/GeneratedAssetSymbols.o"
+  }
+}
