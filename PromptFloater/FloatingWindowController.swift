@@ -1,498 +1,1275 @@
+import SwiftUI
 import Cocoa
-import Carbon
+import Foundation
+import Combine
 
-class MinimizeButton: NSView {
-    weak var windowController: FloatingWindowController?
-    private var isHovered = false
+// MARK: - Data Models
+
+struct Prompt: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var content: String
+    var createdAt = Date()
+    var updatedAt = Date()
     
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-        needsDisplay = true
+    // Computed properties
+    var variables: [String] {
+        PromptParser.extractVariables(from: content)
     }
     
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        needsDisplay = true
+    var isWorkflow: Bool {
+        !calledPrompts.isEmpty
     }
     
-    override func mouseDown(with event: NSEvent) {
-        windowController?.toggleWindowVisibility()
+    var calledPrompts: [String] {
+        PromptParser.extractPromptCalls(from: content)
     }
     
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        
-        for trackingArea in trackingAreas {
-            removeTrackingArea(trackingArea)
-        }
-        
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow]
-        let trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
-        addTrackingArea(trackingArea)
-    }
-    
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        
-        let color = isHovered ? NSColor.controlAccentColor.withAlphaComponent(0.8) : NSColor.controlTextColor.withAlphaComponent(0.6)
-        color.setFill()
-        
-        // Draw minimize line
-        let lineRect = NSRect(x: bounds.midX - 6, y: bounds.midY - 1, width: 12, height: 2)
-        let path = NSBezierPath(roundedRect: lineRect, xRadius: 1, yRadius: 1)
-        path.fill()
+    mutating func updateContent(_ newContent: String) {
+        content = newContent
+        updatedAt = Date()
     }
 }
 
-class SettingsButton: NSView {
-    weak var windowController: FloatingWindowController?
-    private var isHovered = false
+struct ExecutionStep: Identifiable {
+    var id = UUID()
+    var stepId: Int
+    var variables: [String]
+    var context: String
+    var scopedVarNames: [String: String]
+    var filledValues: [String: String]?
     
-    override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-        needsDisplay = true
-    }
-    
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        needsDisplay = true
-    }
-    
-    override func mouseDown(with event: NSEvent) {
-        showSettingsMenu()
-    }
-    
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
+    init(stepId: Int, variables: [String], context: String) {
+        self.stepId = stepId
+        self.variables = variables
+        self.context = context
         
-        for trackingArea in trackingAreas {
-            removeTrackingArea(trackingArea)
+        var scopedNames: [String: String] = [:]
+        for varName in variables {
+            scopedNames[varName] = "step-\(stepId)-\(varName)"
         }
-        
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInKeyWindow]
-        let trackingArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
-        addTrackingArea(trackingArea)
+        self.scopedVarNames = scopedNames
     }
-    
-    private func showSettingsMenu() {
-        let menu = NSMenu()
+}
+
+struct ExecutionLog: Identifiable, Codable {
+    var id = UUID()
+    var workflowName: String
+    var timestamp = Date()
+    var originalInput: String
+    var finalOutput: String
+}
+
+enum ItemType {
+    case prompt
+    case variable
+}
+
+struct ItemWithPosition {
+    let type: ItemType
+    let name: String
+    let position: Int
+    let match: String
+    let range: Range<String.Index>
+}
+
+// MARK: - Parser Utilities
+
+class PromptParser {
+    static func extractVariables(from text: String) -> [String] {
+        let pattern = "\\{\\{(\\w+)\\}\\}"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         
-        let sizeMenu = NSMenu()
-        let smallItem = sizeMenu.addItem(withTitle: "Small (250x80)", action: #selector(resizeSmall), keyEquivalent: "")
-        smallItem.target = self
-        let mediumItem = sizeMenu.addItem(withTitle: "Medium (350x120)", action: #selector(resizeMedium), keyEquivalent: "")
-        mediumItem.target = self
-        let largeItem = sizeMenu.addItem(withTitle: "Large (500x150)", action: #selector(resizeLarge), keyEquivalent: "")
-        largeItem.target = self
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        var variables: [String] = []
         
-        let sizeMenuItem = NSMenuItem(title: "Window Size", action: nil, keyEquivalent: "")
-        sizeMenuItem.submenu = sizeMenu
-        menu.addItem(sizeMenuItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Reset Position", action: #selector(resetPosition), keyEquivalent: "")
-        
-        menu.addItem(NSMenuItem.separator())
-        let shortcutItem = menu.addItem(withTitle: "Change Shortcut...", action: #selector(changeShortcut), keyEquivalent: "")
-        shortcutItem.target = self
-        
-        let currentShortcut = ShortcutManager.shared.getCurrentShortcutString()
-        let shortcutInfoItem = menu.addItem(withTitle: "Current: \(currentShortcut)", action: nil, keyEquivalent: "")
-        shortcutInfoItem.isEnabled = false
-        
-        for item in menu.items {
-            item.target = self
-        }
-        
-        let location = NSPoint(x: bounds.minX, y: bounds.maxY)
-        menu.popUp(positioning: nil, at: location, in: self)
-    }
-    
-    @objc private func resizeSmall() {
-        resizeWindow(to: NSSize(width: 250, height: 80))
-    }
-    
-    @objc private func resizeMedium() {
-        resizeWindow(to: NSSize(width: 350, height: 120))
-    }
-    
-    @objc private func resizeLarge() {
-        resizeWindow(to: NSSize(width: 500, height: 150))
-    }
-    
-    @objc private func resetPosition() {
-        guard let window = windowController?.window else { return }
-        var frame = window.frame
-        frame.origin = NSPoint(x: 50, y: 100)
-        window.setFrame(frame, display: true)
-    }
-    
-    @objc private func changeShortcut() {
-        windowController?.showShortcutChangeDialog()
-    }
-    
-    private func resizeWindow(to size: NSSize) {
-        guard let window = windowController?.window else { return }
-        var frame = window.frame
-        let oldSize = frame.size
-        frame.size = size
-        // Keep the top-left corner in the same position
-        frame.origin.y += (oldSize.height - size.height)
-        window.setFrame(frame, display: true, animate: true)
-        windowController?.updateTextFieldFrame()
-    }
-    
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        
-        let color = isHovered ? NSColor.controlAccentColor.withAlphaComponent(0.8) : NSColor.controlTextColor.withAlphaComponent(0.6)
-        color.setStroke()
-        
-        let lineWidth: CGFloat = 1.5
-        
-        // Draw gear/settings icon
-        let center = NSPoint(x: bounds.midX, y: bounds.midY)
-        let radius: CGFloat = 6
-        let innerRadius: CGFloat = 3
-        let teeth = 8
-        
-        let path = NSBezierPath()
-        
-        for i in 0..<teeth * 2 {
-            let angle = CGFloat(i) * .pi / CGFloat(teeth)
-            let currentRadius = i % 2 == 0 ? radius : innerRadius
-            let x = center.x + currentRadius * cos(angle)
-            let y = center.y + currentRadius * sin(angle)
-            
-            if i == 0 {
-                path.move(to: NSPoint(x: x, y: y))
-            } else {
-                path.line(to: NSPoint(x: x, y: y))
+        for match in matches {
+            if let range = Range(match.range(at: 1), in: text) {
+                variables.append(String(text[range]))
             }
         }
-        path.close()
-        path.lineWidth = lineWidth
-        path.stroke()
         
-        // Draw center circle
-        let centerCircle = NSBezierPath(ovalIn: NSRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4))
-        centerCircle.lineWidth = lineWidth
-        centerCircle.stroke()
-    }
-}
-
-class ResizeHandle: NSView {
-    weak var windowController: FloatingWindowController?
-    private var isResizing = false
-    private var startLocation = NSPoint.zero
-    private var startSize = NSSize.zero
-    
-    override func mouseDown(with event: NSEvent) {
-        isResizing = true
-        startLocation = event.locationInWindow
-        startSize = window?.frame.size ?? NSSize.zero
+        return Array(Set(variables))
     }
     
-    override func mouseDragged(with event: NSEvent) {
-        guard isResizing, let window = self.window else { return }
+    static func extractPromptCalls(from text: String) -> [String] {
+        let pattern = "(\\w+)\\(\\)"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         
-        let currentLocation = event.locationInWindow
-        let deltaX = currentLocation.x - startLocation.x
-        let deltaY = currentLocation.y - startLocation.y
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        var calls: [String] = []
         
-        let newWidth = max(200, startSize.width + deltaX)
-        let newHeight = max(80, startSize.height - deltaY)
-        
-        var frame = window.frame
-        frame.size.width = newWidth
-        frame.origin.y = frame.origin.y + (frame.size.height - newHeight)
-        frame.size.height = newHeight
-        
-        window.setFrame(frame, display: true)
-        
-        if let controller = windowController {
-            controller.updateTextFieldFrame()
+        for match in matches {
+            if let range = Range(match.range(at: 1), in: text) {
+                calls.append(String(text[range]))
+            }
         }
-    }
-    
-    override func mouseUp(with event: NSEvent) {
-        isResizing = false
-    }
-    
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
         
-        NSColor.gray.withAlphaComponent(0.3).setFill()
-        let path = NSBezierPath()
-        for i in 0..<3 {
-            for j in 0..<3 {
-                if i + j >= 2 {
-                    let x = CGFloat(i * 4 + 8)
-                    let y = CGFloat(j * 4 + 8)
-                    path.appendOval(in: NSRect(x: x, y: y, width: 2, height: 2))
+        return calls
+    }
+    
+    static func findItemsWithPositions(_ text: String) -> [ItemWithPosition] {
+        var items: [ItemWithPosition] = []
+        
+        // Find prompt calls
+        let promptPattern = "(\\w+)\\(\\)"
+        if let promptRegex = try? NSRegularExpression(pattern: promptPattern) {
+            let matches = promptRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: text),
+                   let fullRange = Range(match.range, in: text) {
+                    items.append(ItemWithPosition(
+                        type: .prompt,
+                        name: String(text[range]),
+                        position: match.range.location,
+                        match: String(text[fullRange]),
+                        range: fullRange
+                    ))
                 }
             }
         }
-        path.fill()
+        
+        // Find variables
+        let varPattern = "\\{\\{(\\w+)\\}\\}"
+        if let varRegex = try? NSRegularExpression(pattern: varPattern) {
+            let matches = varRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: text),
+                   let fullRange = Range(match.range, in: text) {
+                    items.append(ItemWithPosition(
+                        type: .variable,
+                        name: String(text[range]),
+                        position: match.range.location,
+                        match: String(text[fullRange]),
+                        range: fullRange
+                    ))
+                }
+            }
+        }
+        
+        return items.sorted { $0.position < $1.position }
     }
 }
 
-class ShortcutManager {
-    static let shared = ShortcutManager()
-    
-    private var hotKeyRef: EventHotKeyRef?
-    private var hotKeyID: EventHotKeyID = EventHotKeyID(signature: 0x50464C54, id: 1) // "PFLT" as hex
-    
-    weak var windowController: FloatingWindowController?
-    
-    private init() {}
-    
-    func registerGlobalShortcut() {
-        unregisterGlobalShortcut() // Clean up any existing registration
+// MARK: - Execution Engine
+
+class ExecutionEngine {
+    static func buildExecutionQueue(from input: String, prompts: [Prompt]) -> [ExecutionStep] {
+        var queue: [ExecutionStep] = []
+        var stepCounter = 0
         
-        let shortcut = getCurrentShortcut()
-        print("Registering global shortcut: \(shortcut.displayString)")
-        
-        // Use NSEvent-based global monitoring instead of Carbon
-        let eventMask: NSEvent.EventTypeMask = [.keyDown]
-        
-        NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
-            self?.handleGlobalKeyEvent(event)
+        func expandContent(_ text: String, parentContext: String = "") {
+            let items = PromptParser.findItemsWithPositions(text)
+            var callCounts: [String: Int] = [:]
+            
+            for item in items {
+                if item.type == .prompt {
+                    guard let prompt = prompts.first(where: { $0.name == item.name }) else { continue }
+                    
+                    callCounts[item.name, default: 0] += 1
+                    let totalCalls = items.filter { $0.type == .prompt && $0.name == item.name }.count
+                    var context = parentContext.isEmpty ? "" : "\(parentContext) → "
+                    context += item.name
+                    if totalCalls > 1 {
+                        context += " (call \(callCounts[item.name]!))"
+                    }
+                    
+                    expandContent(prompt.content, parentContext: context)
+                    
+                } else if item.type == .variable {
+                    let context = parentContext.isEmpty ? "Main Input" : parentContext
+                    
+                    queue.append(ExecutionStep(
+                        stepId: stepCounter,
+                        variables: [item.name],
+                        context: context
+                    ))
+                    
+                    stepCounter += 1
+                }
+            }
         }
         
-        print("Global shortcut monitoring started")
+        expandContent(input)
+        return queue
     }
     
-    private func handleGlobalKeyEvent(_ event: NSEvent) {
-        let shortcut = getCurrentShortcut()
+    static func resolveContent(_ text: String, currentStepId: Int = 0, allValues: [String: String], prompts: [Prompt]) -> String {
+        var resolved = text
+        let items = PromptParser.findItemsWithPositions(text)
         
-        // Check if the event matches our shortcut
-        let expectedModifiers = NSEvent.ModifierFlags(rawValue: UInt(shortcut.modifiers))
-        let actualModifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
+        // Process in REVERSE for string replacement
+        for i in stride(from: items.count - 1, through: 0, by: -1) {
+            let item = items[i]
+            
+            // Calculate stepId in FORWARD order
+            let itemStepId = currentStepId + i
+            
+            if item.type == .prompt {
+                guard let prompt = prompts.first(where: { $0.name == item.name }) else { continue }
+                let promptResolved = resolveContent(prompt.content, currentStepId: itemStepId, allValues: allValues, prompts: prompts)
+                resolved = resolved.replacingCharacters(in: item.range, with: promptResolved)
+            } else if item.type == .variable {
+                let scopedKey = "step-\(itemStepId)-\(item.name)"
+                let value = allValues[scopedKey] ?? item.match
+                resolved = resolved.replacingCharacters(in: item.range, with: value)
+            }
+        }
         
-        if Int(event.keyCode) == shortcut.keyCode && actualModifiers == expectedModifiers {
-            print("Global shortcut triggered!")
-            DispatchQueue.main.async {
-                self.windowController?.toggleWindowVisibility()
+        return resolved
+    }
+}
+
+// MARK: - PromptFlow Manager
+
+class PromptFlowManager: ObservableObject {
+    @Published var prompts: [Prompt] = []
+    @Published var executionLog: [ExecutionLog] = []
+    @Published var isExecuting = false
+    @Published var currentExecutionSteps: [ExecutionStep] = []
+    @Published var currentStepIndex = 0
+    @Published var executionValues: [String: String] = [:]
+    @Published var windowOpacity: Double = 0.95
+    @Published var searchQuery = ""
+    @Published var selectedTab = 0
+    @Published var editingPrompt: Prompt?
+    @Published var isShowingExecutionModal = false
+    
+    private let userDefaults = UserDefaults.standard
+    
+    init() {
+        loadData()
+        loadSamplePrompts()
+    }
+    
+    // MARK: - Prompt Management
+    
+    func addPrompt(name: String, content: String) -> Bool {
+        guard !prompts.contains(where: { $0.name == name }) else { return false }
+        
+        let newPrompt = Prompt(name: name, content: content)
+        prompts.append(newPrompt)
+        saveData()
+        return true
+    }
+    
+    func updatePrompt(_ prompt: Prompt, name: String, content: String) -> Bool {
+        guard !prompts.contains(where: { $0.name == name && $0.id != prompt.id }) else { return false }
+        
+        if let index = prompts.firstIndex(where: { $0.id == prompt.id }) {
+            prompts[index].name = name
+            prompts[index].updateContent(content)
+            saveData()
+            return true
+        }
+        return false
+    }
+    
+    func deletePrompt(_ prompt: Prompt) {
+        prompts.removeAll { $0.id == prompt.id }
+        saveData()
+    }
+    
+    var filteredPrompts: [Prompt] {
+        guard !searchQuery.isEmpty else { return prompts }
+        return prompts.filter {
+            $0.name.localizedCaseInsensitiveContains(searchQuery) ||
+            $0.content.localizedCaseInsensitiveContains(searchQuery)
+        }
+    }
+    
+    // MARK: - Execution
+    
+    func executeContent(_ content: String) {
+        let steps = ExecutionEngine.buildExecutionQueue(from: content, prompts: prompts)
+        
+        if steps.isEmpty {
+            let resolvedContent = ExecutionEngine.resolveContent(content, allValues: [:], prompts: prompts)
+            addExecutionLog(name: "Direct Execution", originalInput: content, finalOutput: resolvedContent)
+        } else {
+            currentExecutionSteps = steps
+            currentStepIndex = 0
+            executionValues = [:]
+            isExecuting = true
+            isShowingExecutionModal = true
+        }
+    }
+    
+    func submitCurrentStepValues() -> Bool {
+        guard isExecuting, currentStepIndex < currentExecutionSteps.count else { return false }
+        
+        let currentStep = currentExecutionSteps[currentStepIndex]
+        
+        for variable in currentStep.variables {
+            guard let value = executionValues[variable], !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return false
+            }
+        }
+        
+        var scopedValues: [String: String] = [:]
+        for variable in currentStep.variables {
+            let scopedName = currentStep.scopedVarNames[variable] ?? variable
+            scopedValues[scopedName] = executionValues[variable]
+        }
+        
+        currentExecutionSteps[currentStepIndex].filledValues = scopedValues
+        currentStepIndex += 1
+        executionValues = [:]
+        
+        if currentStepIndex >= currentExecutionSteps.count {
+            completeExecution()
+        }
+        
+        return true
+    }
+    
+    func cancelExecution() {
+        isExecuting = false
+        isShowingExecutionModal = false
+        currentExecutionSteps = []
+        currentStepIndex = 0
+        executionValues = [:]
+    }
+    
+    private func completeExecution() {
+        var allScopedValues: [String: String] = [:]
+        for step in currentExecutionSteps {
+            if let filledValues = step.filledValues {
+                allScopedValues.merge(filledValues) { _, new in new }
+            }
+        }
+        
+        let originalContent = "Workflow Execution"
+        let resolvedContent = ExecutionEngine.resolveContent(originalContent, allValues: allScopedValues, prompts: prompts)
+        
+        addExecutionLog(name: "Workflow Complete", originalInput: originalContent, finalOutput: resolvedContent)
+        
+        isExecuting = false
+        isShowingExecutionModal = false
+        currentExecutionSteps = []
+        currentStepIndex = 0
+        executionValues = [:]
+    }
+    
+    private func addExecutionLog(name: String, originalInput: String, finalOutput: String) {
+        let log = ExecutionLog(workflowName: name, originalInput: originalInput, finalOutput: finalOutput)
+        executionLog.insert(log, at: 0)
+        
+        if executionLog.count > 50 {
+            executionLog = Array(executionLog.prefix(50))
+        }
+        
+        saveData()
+    }
+    
+    // MARK: - Persistence
+    
+    private func saveData() {
+        if let promptsData = try? JSONEncoder().encode(prompts) {
+            userDefaults.set(promptsData, forKey: "prompts")
+        }
+        if let logsData = try? JSONEncoder().encode(executionLog) {
+            userDefaults.set(logsData, forKey: "logs")
+        }
+        userDefaults.set(windowOpacity, forKey: "windowOpacity")
+    }
+    
+    private func loadData() {
+        if let promptsData = userDefaults.data(forKey: "prompts"),
+           let savedPrompts = try? JSONDecoder().decode([Prompt].self, from: promptsData) {
+            prompts = savedPrompts
+        }
+        
+        if let logsData = userDefaults.data(forKey: "logs"),
+           let savedLogs = try? JSONDecoder().decode([ExecutionLog].self, from: logsData) {
+            executionLog = savedLogs
+        }
+        
+        windowOpacity = userDefaults.double(forKey: "windowOpacity")
+        if windowOpacity == 0 { windowOpacity = 0.95 }
+    }
+    
+    private func loadSamplePrompts() {
+        guard prompts.isEmpty else { return }
+        
+        prompts = [
+            Prompt(name: "greet", content: "Hello {{name}}! Welcome to PromptFlow."),
+            Prompt(name: "deployInfra", content: "Deploying infrastructure for {{environment}} with {{instanceType}} instances."),
+            Prompt(name: "fullDeploy", content: "greet()\n\nStarting deployment process:\n1. deployInfra()\n2. Running tests on {{environment}}\n3. Deployment complete!")
+        ]
+        saveData()
+    }
+}
+
+// MARK: - SwiftUI Views
+
+struct PromptFlowApp: View {
+    @StateObject private var manager = PromptFlowManager()
+    @State private var inputText = "Enter your prompt here..."
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HeaderView(manager: manager)
+            
+            // Main Content
+            HStack(spacing: 0) {
+                // Left Panel - Input Area
+                VStack(spacing: 12) {
+                    TextEditor(text: $inputText)
+                        .font(.system(.body, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                        )
+                    
+                    HStack(spacing: 8) {
+                        Button("▶️ Execute") {
+                            manager.executeContent(inputText)
+                        }
+                        .buttonStyle(ExecuteButtonStyle())
+                        
+                        Spacer()
+                    }
+                }
+                .frame(width: 300)
+                .padding(16)
+                
+                // Right Panel - Management Interface
+                ManagementPanelView(manager: manager)
+            }
+        }
+        .background(.regularMaterial)
+        .sheet(isPresented: $manager.isShowingExecutionModal) {
+            ExecutionModalView(manager: manager)
+        }
+        .onReceive(manager.$windowOpacity) { opacity in
+            // Update window opacity when slider changes
+            updateWindowOpacity(opacity)
+        }
+    }
+    
+    private func updateWindowOpacity(_ opacity: Double) {
+        DispatchQueue.main.async {
+            if let window = NSApp.keyWindow {
+                window.alphaValue = CGFloat(opacity)
+            }
+        }
+    }
+}
+
+struct HeaderView: View {
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        HStack {
+            Text("PromptFlow Manager")
+                .font(.title3)
+                .fontWeight(.medium)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [Color(red: 0.4, green: 0.494, blue: 0.918), Color(red: 0.463, green: 0.294, blue: 0.635)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+            
+            Spacer()
+            
+            HStack(spacing: 8) {
+                Text("\(Int(manager.windowOpacity * 100))%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Slider(value: $manager.windowOpacity, in: 0.3...1.0)
+                    .frame(width: 120)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            LinearGradient(
+                colors: [Color(red: 0.4, green: 0.494, blue: 0.918).opacity(0.2), Color(red: 0.463, green: 0.294, blue: 0.635).opacity(0.2)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+    }
+}
+
+struct ManagementPanelView: View {
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Tab Bar
+            HStack(spacing: 0) {
+                TabButton(title: "📚 Prompts", count: manager.prompts.count, isSelected: manager.selectedTab == 0) {
+                    manager.selectedTab = 0
+                }
+                
+                TabButton(title: "➕ Create/Edit", isSelected: manager.selectedTab == 1) {
+                    manager.selectedTab = 1
+                }
+                
+                TabButton(title: "📋 Logs", count: manager.executionLog.count, isSelected: manager.selectedTab == 2) {
+                    manager.selectedTab = 2
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            
+            // Tab Content
+            ScrollView {
+                switch manager.selectedTab {
+                case 0:
+                    PromptsTabView(manager: manager)
+                case 1:
+                    CreateEditTabView(manager: manager)
+                case 2:
+                    LogsTabView(manager: manager)
+                default:
+                    EmptyView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 400)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.8))
+    }
+}
+
+struct TabButton: View {
+    let title: String
+    var count: Int?
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(isSelected ? .semibold : .regular)
+                
+                if let count = count {
+                    Text("\(count)")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.2))
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(backgroundForButton)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isSelected ? Color.purple : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var backgroundForButton: some View {
+        Group {
+            if isSelected {
+                LinearGradient(
+                    colors: [Color(red: 0.4, green: 0.494, blue: 0.918), Color(red: 0.463, green: 0.294, blue: 0.635)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                ).opacity(0.8)
+            } else {
+                Color.clear
+            }
+        }
+    }
+}
+
+struct PromptsTabView: View {
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            // Search Bar
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                
+                TextField("Search prompts...", text: $manager.searchQuery)
+                    .textFieldStyle(PlainTextFieldStyle())
+                
+                if !manager.searchQuery.isEmpty {
+                    Button("Clear") {
+                        manager.searchQuery = ""
+                    }
+                    .font(.caption)
+                }
+            }
+            .padding(8)
+            .background(Color(NSColor.textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            
+            // Prompts List
+            LazyVStack(spacing: 8) {
+                ForEach(manager.filteredPrompts) { prompt in
+                    PromptCardView(prompt: prompt, manager: manager)
+                }
+            }
+            
+            if manager.filteredPrompts.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No prompts yet")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .padding(40)
+            }
+            
+            Spacer()
+        }
+        .padding(16)
+    }
+}
+
+struct PromptCardView: View {
+    let prompt: Prompt
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("\(prompt.name)()")
+                    .font(.system(.headline, design: .monospaced))
+                    .foregroundColor(.primary)
+                
+                if prompt.isWorkflow {
+                    Text("workflow")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.blue.opacity(0.2))
+                        .clipShape(Capsule())
+                }
+                
+                Spacer()
+            }
+            
+            if !prompt.variables.isEmpty {
+                HStack {
+                    Text("requires:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    FlowLayout {
+                        ForEach(prompt.variables, id: \.self) { variable in
+                            Text(variable)
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.purple.opacity(0.2))
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
+            }
+            
+            Text(prompt.content)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+            
+            Text("Updated \(prompt.updatedAt, formatter: DateFormatter.shortDateTime)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            
+            HStack(spacing: 8) {
+                Button("Insert") {
+                    // Insert prompt call into input
+                }
+                .font(.caption)
+                .buttonStyle(SecondaryButtonStyle())
+                
+                Button("Edit") {
+                    manager.editingPrompt = prompt
+                    manager.selectedTab = 1
+                }
+                .font(.caption)
+                .buttonStyle(SecondaryButtonStyle())
+                
+                Button("Delete") {
+                    manager.deletePrompt(prompt)
+                }
+                .font(.caption)
+                .buttonStyle(DangerButtonStyle())
+            }
+        }
+        .padding(12)
+        .background(Color(NSColor.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct CreateEditTabView: View {
+    @ObservedObject var manager: PromptFlowManager
+    @State private var promptName = ""
+    @State private var promptContent = ""
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Prompt Name
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Prompt Name")
+                    .font(.headline)
+                
+                TextField("Enter prompt name...", text: $promptName)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+            }
+            
+            // Prompt Content
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Prompt Content")
+                    .font(.headline)
+                
+                TextEditor(text: $promptContent)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .background(Color(NSColor.textBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                    )
+                    .frame(minHeight: 120)
+            }
+            
+            // Variables Detected
+            let variables = PromptParser.extractVariables(from: promptContent)
+            if !variables.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Variables detected:")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    
+                    FlowLayout {
+                        ForEach(variables, id: \.self) { variable in
+                            Text(variable)
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.purple.opacity(0.2))
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
+            }
+            
+            // Workflow Indicator
+            let calledPrompts = PromptParser.extractPromptCalls(from: promptContent)
+            if !calledPrompts.isEmpty {
+                HStack {
+                    Text("🔗")
+                    Text("This is a workflow! Calls: \(calledPrompts.joined(separator: ", "))")
+                        .font(.caption)
+                }
+                .padding(8)
+                .background(Color.blue.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            
+            // Buttons
+            HStack(spacing: 12) {
+                Button("Save") {
+                    savePrompt()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(promptName.isEmpty || promptContent.isEmpty)
+                
+                Button("Cancel") {
+                    clearForm()
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+            
+            Spacer()
+        }
+        .padding(16)
+        .onAppear {
+            if let editing = manager.editingPrompt {
+                promptName = editing.name
+                promptContent = editing.content
+            }
+        }
+        .onChange(of: manager.editingPrompt) { editing in
+            if let editing = editing {
+                promptName = editing.name
+                promptContent = editing.content
+            } else {
+                clearForm()
             }
         }
     }
     
-    func unregisterGlobalShortcut() {
-        // NSEvent monitoring will be cleaned up when the app terminates
-        print("Global shortcut monitoring stopped")
-    }
-    
-    private struct ShortcutInfo {
-        let keyCode: Int
-        let modifiers: Int
-        let displayString: String
-    }
-    
-    private func getCurrentShortcut() -> ShortcutInfo {
-        let savedShortcut = UserDefaults.standard.string(forKey: "GlobalShortcut") ?? "cmd+option+space"
-        
-        switch savedShortcut.lowercased() {
-        case "cmd+option+space":
-            return ShortcutInfo(keyCode: 49, modifiers: Int(NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.option.rawValue), displayString: "⌘⌥Space")
-        case "cmd+shift+p":
-            return ShortcutInfo(keyCode: 35, modifiers: Int(NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.shift.rawValue), displayString: "⌘⇧P")
-        case "cmd+option+p":
-            return ShortcutInfo(keyCode: 35, modifiers: Int(NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.option.rawValue), displayString: "⌘⌥P")
-        default:
-            return ShortcutInfo(keyCode: 49, modifiers: Int(NSEvent.ModifierFlags.command.rawValue | NSEvent.ModifierFlags.option.rawValue), displayString: "⌘⌥Space")
+    private func savePrompt() {
+        if let editing = manager.editingPrompt {
+            _ = manager.updatePrompt(editing, name: promptName, content: promptContent)
+        } else {
+            _ = manager.addPrompt(name: promptName, content: promptContent)
         }
+        clearForm()
     }
     
-    func getCurrentShortcutString() -> String {
-        return getCurrentShortcut().displayString
-    }
-    
-    func setShortcut(_ shortcutKey: String) {
-        UserDefaults.standard.set(shortcutKey, forKey: "GlobalShortcut")
-        registerGlobalShortcut()
-    }
-    
-    private func fourCharCode(_ string: String) -> FourCharCode {
-        let chars = Array(string.utf8)
-        return FourCharCode(chars[0]) << 24 | FourCharCode(chars[1]) << 16 | FourCharCode(chars[2]) << 8 | FourCharCode(chars[3])
+    private func clearForm() {
+        promptName = ""
+        promptContent = ""
+        manager.editingPrompt = nil
     }
 }
 
-class FloatingWindowController: NSWindowController {
+struct LogsTabView: View {
+    @ObservedObject var manager: PromptFlowManager
     
-    private var textField: NSTextField!
-    private var isHidden = false
-    private var savedPosition: NSPoint = NSPoint(x: 50, y: 100)
+    var body: some View {
+        VStack(spacing: 12) {
+            if manager.executionLog.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "clock")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No executions yet")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .padding(40)
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(manager.executionLog) { log in
+                        LogCardView(log: log)
+                    }
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(16)
+    }
+}
+
+struct LogCardView: View {
+    let log: ExecutionLog
+    @State private var isExpanded = false
     
-    override init(window: NSWindow?) {
-        super.init(window: window)
-        setupFloatingWindow()
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(log.workflowName)
+                        .font(.headline)
+                    Text(log.timestamp, formatter: DateFormatter.fullDateTime)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(isExpanded ? "Collapse" : "Expand") {
+                    withAnimation {
+                        isExpanded.toggle()
+                    }
+                }
+                .font(.caption)
+            }
+            
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Result:")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    
+                    Text(log.finalOutput)
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(8)
+                        .background(Color(NSColor.textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(NSColor.controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct ExecutionModalView: View {
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        if manager.currentStepIndex < manager.currentExecutionSteps.count {
+            let currentStep = manager.currentExecutionSteps[manager.currentStepIndex]
+            ExecutionStepView(step: currentStep, manager: manager)
+        } else {
+            Text("No execution steps")
+                .frame(width: 500, height: 600)
+                .background(.regularMaterial)
+        }
+    }
+}
+
+struct ExecutionStepView: View {
+    let step: ExecutionStep
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            ExecutionHeaderView(step: step, manager: manager)
+            ExecutionInfoBanner(step: step)
+            ExecutionVariableInputs(step: step, manager: manager)
+            ExecutionFooterButtons(step: step, manager: manager)
+        }
+        .frame(width: 500, height: 600)
+        .background(.regularMaterial)
+    }
+}
+
+struct ExecutionHeaderView: View {
+    let step: ExecutionStep
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Step \(manager.currentStepIndex + 1) of \(manager.currentExecutionSteps.count)")
+                    .font(.headline)
+                
+                Spacer()
+                
+                Text("\(Int(Double(manager.currentStepIndex) / Double(manager.currentExecutionSteps.count) * 100))% complete")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Text(step.context)
+                .font(.system(.subheadline, design: .monospaced))
+                .foregroundColor(.purple)
+            
+            Text("Provide values for this prompt's variables")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(16)
+    }
+}
+
+struct ExecutionInfoBanner: View {
+    let step: ExecutionStep
+    
+    var body: some View {
+        HStack {
+            Image(systemName: "info.circle")
+            Text("These variables are used in: \(step.context)")
+                .font(.caption)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.1))
+    }
+}
+
+struct ExecutionVariableInputs: View {
+    let step: ExecutionStep
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                ForEach(step.variables, id: \.self) { variable in
+                    VariableInputRow(variable: variable, step: step, manager: manager)
+                }
+            }
+            .padding(16)
+        }
+    }
+}
+
+struct VariableInputRow: View {
+    let variable: String
+    let step: ExecutionStep
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(variable)
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.purple.opacity(0.2))
+                    .clipShape(Capsule())
+                
+                Text("*")
+                    .foregroundColor(.red)
+                
+                Spacer()
+                
+                if let value = manager.executionValues[variable], !value.isEmpty {
+                    HStack {
+                        Image(systemName: "checkmark")
+                            .foregroundColor(.green)
+                        Text("provided")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                }
+            }
+            
+            TextField("Value for \(variable) in \(step.context)...", text: Binding(
+                get: { manager.executionValues[variable] ?? "" },
+                set: { manager.executionValues[variable] = $0 }
+            ))
+            .textFieldStyle(RoundedBorderTextFieldStyle())
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        (manager.executionValues[variable]?.isEmpty ?? true) ? Color.gray : Color.green,
+                        lineWidth: 1
+                    )
+            )
+        }
+    }
+}
+
+struct ExecutionFooterButtons: View {
+    let step: ExecutionStep
+    @ObservedObject var manager: PromptFlowManager
+    
+    var body: some View {
+        VStack(spacing: 8) {
+            let missingVars = step.variables.filter { manager.executionValues[$0]?.isEmpty ?? true }
+            
+            Button(action: {
+                if manager.submitCurrentStepValues() {
+                    // Continue to next step or complete
+                }
+            }) {
+                HStack {
+                    if !missingVars.isEmpty {
+                        Image(systemName: "exclamationmark.triangle")
+                        Text("Missing: \(missingVars.joined(separator: ", "))")
+                    } else {
+                        Image(systemName: manager.currentStepIndex == manager.currentExecutionSteps.count - 1 ? "checkmark" : "arrow.right")
+                        Text(manager.currentStepIndex == manager.currentExecutionSteps.count - 1 ? "Complete Workflow" : "Next Prompt")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(buttonBackground(missingVars: missingVars))
+                .foregroundColor(missingVars.isEmpty ? .white : .gray)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .disabled(!missingVars.isEmpty)
+            
+            Button("Cancel") {
+                manager.cancelExecution()
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .padding(16)
     }
     
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setupFloatingWindow()
+    private func buttonBackground(missingVars: [String]) -> some View {
+        Group {
+            if missingVars.isEmpty {
+                LinearGradient(colors: [Color.green.opacity(0.8), Color.green], startPoint: .leading, endPoint: .trailing)
+            } else {
+                Color.gray.opacity(0.3)
+            }
+        }
+    }
+}
+
+// MARK: - Custom Button Styles
+
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.4, green: 0.494, blue: 0.918), Color(red: 0.463, green: 0.294, blue: 0.635)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+struct SecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+            .foregroundColor(.primary)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+struct DangerButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.red.opacity(0.1))
+            .foregroundColor(.red)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+struct ExecuteButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                LinearGradient(
+                    colors: [Color(red: 0.133, green: 0.588, blue: 0.353), Color.green],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+// MARK: - Helper Views
+
+struct FlowLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = FlowResult(
+            in: proposal.replacingUnspecifiedDimensions().width,
+            subviews: subviews
+        )
+        return result.bounds
     }
     
-    convenience init() {
-        self.init(window: nil)
-        ShortcutManager.shared.windowController = self
-        ShortcutManager.shared.registerGlobalShortcut()
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = FlowResult(
+            in: bounds.width,
+            subviews: subviews
+        )
+        for index in subviews.indices {
+            let frame = result.frames[index]
+            subviews[index].place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
+        }
     }
+}
+
+struct FlowResult {
+    var frames: [CGRect] = []
+    var bounds = CGSize.zero
     
-    private func setupFloatingWindow() {
-        let windowFrame = NSRect(x: 50, y: 100, width: 300, height: 100)
+    init(in maxWidth: CGFloat, subviews: LayoutSubviews) {
+        var origin = CGPoint.zero
+        var rowHeight: CGFloat = 0
         
-        let floatingWindow = NSWindow(
-            contentRect: windowFrame,
-            styleMask: [.borderless],
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            
+            if origin.x + size.width > maxWidth {
+                origin.x = 0
+                origin.y += rowHeight + 4
+                rowHeight = 0
+            }
+            
+            frames.append(CGRect(origin: origin, size: size))
+            
+            origin.x += size.width + 4
+            rowHeight = max(rowHeight, size.height)
+        }
+        
+        bounds = CGSize(width: maxWidth, height: origin.y + rowHeight)
+    }
+}
+
+// MARK: - Date Formatters
+
+extension DateFormatter {
+    static let shortDateTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+    
+    static let fullDateTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+}
+
+// MARK: - FloatingWindowController
+
+@objc class FloatingWindowController: NSWindowController {
+    convenience init() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 100, y: 100, width: 700, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         
-        floatingWindow.level = NSWindow.Level.floating
-        floatingWindow.isOpaque = false
-        floatingWindow.backgroundColor = NSColor.clear
-        floatingWindow.hasShadow = false
-        floatingWindow.ignoresMouseEvents = false
-        floatingWindow.isMovableByWindowBackground = true
-        floatingWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-        
-        setupContentView(for: floatingWindow)
-        
-        self.window = floatingWindow
+        self.init(window: window)
+        setupWindow()
     }
     
-    private func setupContentView(for window: NSWindow) {
-        let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
-        contentView.wantsLayer = true
-        contentView.layer?.cornerRadius = 8
+    private func setupWindow() {
+        guard let window = window else { return }
         
-        let material = NSVisualEffectView()
-        material.frame = contentView.bounds
-        material.autoresizingMask = [.width, .height]
-        material.material = .hudWindow
-        material.blendingMode = .behindWindow
-        material.state = .active
-        material.alphaValue = 0.6
-        material.wantsLayer = true
-        material.layer?.cornerRadius = 8
+        window.title = "PromptFlow"
+        window.titlebarAppearsTransparent = false
+        window.isMovableByWindowBackground = true
+        window.level = .floating
         
-        contentView.addSubview(material)
+        // Set minimum and maximum sizes
+        window.minSize = NSSize(width: 700, height: 600)
+        window.maxSize = NSSize(width: 1000, height: 800)
         
-        let minimizeButton = MinimizeButton()
-        minimizeButton.translatesAutoresizingMaskIntoConstraints = false
-        minimizeButton.windowController = self
+        // Create the SwiftUI hosting view
+        let hostingView = NSHostingView(rootView: PromptFlowApp())
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
         
-        let settingsButton = SettingsButton()
-        settingsButton.translatesAutoresizingMaskIntoConstraints = false
-        settingsButton.windowController = self
+        // Set the content view
+        window.contentView = hostingView
         
-        let resizeHandle = ResizeHandle()
-        resizeHandle.translatesAutoresizingMaskIntoConstraints = false
-        resizeHandle.windowController = self
-        
-        textField = NSTextField()
-        textField.translatesAutoresizingMaskIntoConstraints = false
-        textField.stringValue = "Prompt Autocompletion\nFloating Window"
-        textField.isEditable = false
-        textField.isSelectable = false
-        textField.isBezeled = false
-        textField.drawsBackground = false
-        textField.textColor = NSColor.controlTextColor
-        textField.font = NSFont.systemFont(ofSize: 14)
-        textField.alignment = .center
-        textField.maximumNumberOfLines = 0
-        
-        contentView.addSubview(textField)
-        contentView.addSubview(minimizeButton)
-        contentView.addSubview(settingsButton)
-        contentView.addSubview(resizeHandle)
-        
+        // Add constraints to fill the window
         NSLayoutConstraint.activate([
-            // Text field constraints
-            textField.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            textField.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
-            textField.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 20),
-            textField.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -30),
-            textField.topAnchor.constraint(greaterThanOrEqualTo: contentView.topAnchor, constant: 30),
-            textField.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -30),
-            
-            // Minimize button constraints (left of settings)
-            minimizeButton.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -4),
-            minimizeButton.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            minimizeButton.widthAnchor.constraint(equalToConstant: 20),
-            minimizeButton.heightAnchor.constraint(equalToConstant: 20),
-            
-            // Settings button constraints
-            settingsButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
-            settingsButton.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            settingsButton.widthAnchor.constraint(equalToConstant: 20),
-            settingsButton.heightAnchor.constraint(equalToConstant: 20),
-            
-            // Resize handle constraints
-            resizeHandle.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            resizeHandle.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            resizeHandle.widthAnchor.constraint(equalToConstant: 20),
-            resizeHandle.heightAnchor.constraint(equalToConstant: 20)
+            hostingView.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor)
         ])
-        
-        window.contentView = contentView
-    }
-    
-    func updateText(_ text: String) {
-        textField.stringValue = text
-    }
-    
-    func updateTextFieldFrame() {
-        // Text field now uses constraints, so just force a layout update
-        window?.contentView?.needsLayout = true
-        window?.contentView?.layoutSubtreeIfNeeded()
-    }
-    
-    func toggleWindowVisibility() {
-        guard let window = self.window else { return }
-        
-        if isHidden {
-            // Show window
-            window.setFrameOrigin(savedPosition)
-            window.alphaValue = 0.0
-            window.makeKeyAndOrderFront(nil)
-            window.animator().alphaValue = 1.0
-            isHidden = false
-        } else {
-            // Hide window
-            savedPosition = window.frame.origin
-            window.animator().alphaValue = 0.0
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                window.orderOut(nil)
-                self.isHidden = true
-            }
-        }
-    }
-    
-    func showShortcutChangeDialog() {
-        let alert = NSAlert()
-        alert.messageText = "Change Global Shortcut"
-        alert.informativeText = "Choose a new keyboard shortcut to show/hide the window:"
-        
-        alert.addButton(withTitle: "⌘⌥Space (Default)")
-        alert.addButton(withTitle: "⌘⇧P")
-        alert.addButton(withTitle: "⌘⌥P")
-        alert.addButton(withTitle: "Cancel")
-        
-        let response = alert.runModal()
-        
-        switch response {
-        case .alertFirstButtonReturn:
-            ShortcutManager.shared.setShortcut("cmd+option+space")
-        case .alertSecondButtonReturn:
-            ShortcutManager.shared.setShortcut("cmd+shift+p")
-        case .alertThirdButtonReturn:
-            ShortcutManager.shared.setShortcut("cmd+option+p")
-        default:
-            break
-        }
     }
 }
